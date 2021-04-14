@@ -2,26 +2,17 @@ package design
 
 import (
 	"fmt"
-	"os"
 
 	. "goa.design/goa/v3/dsl"
 )
 
-func buildServer() {
+func buildServer(host string) {
 	address := "0.0.0.0"
 	httpPort := "8000"
 	grpcPort := "8080"
-	listenAddress, present := os.LookupEnv("LISTEN")
-	if present {
-		address = listenAddress
-	}
-	webPort, present := os.LookupEnv("HTTP_PORT")
-	if present {
-		httpPort = webPort
-	}
-	rpcPort, present := os.LookupEnv("GRPC_PORT")
-	if present {
-		grpcPort = rpcPort
+
+	if host == "dev" {
+		address = "localhost"
 	}
 	Description(fmt.Sprintf("Run the service listening on %s.", address))
 	URI(fmt.Sprintf("http://%s:%s", address, httpPort))
@@ -35,12 +26,13 @@ var _ = API("fuseml", func() {
 	// Server describes a single process listening for client requests. The DSL
 	// defines the set of services that the server hosts as well as hosts details.
 	Server("fuseml-core", func() {
-		Description("fuseml-core hosts the core services")
+		Description("fuseml-core services")
 
 		// List the services hosted by this server.
 		Services("runnable", "openapi")
 
 		// List the Hosts and their transport URLs.
-		Host("prod", buildServer)
+		Host("prod", func() { buildServer("prod") })
+		Host("dev", func() { buildServer("dev") })
 	})
 })
