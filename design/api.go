@@ -32,7 +32,18 @@ var _ = API("fuseml", func() {
 		Services("runnable", "openapi")
 
 		// List the Hosts and their transport URLs.
-		Host("prod", func() { buildServer("prod") })
-		Host("dev", func() { buildServer("dev") })
+		Host("all", func() {
+			Description("TODO")
+			// URIs can be parameterized using {param} notation.
+			URI("https://{url}:8000")
+			URI("grpcs://{url}:8080")
+
+			// Variable describes a URI variable.
+			Variable("url", String, "URL", func() {
+				// URL parameters must have a default value and/or an
+				// enum validation.
+				Default("0.0.0.0")
+			})
+		})
 	})
 })
