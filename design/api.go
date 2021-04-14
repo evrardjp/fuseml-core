@@ -1,8 +1,32 @@
 package design
 
 import (
+	"fmt"
+	"os"
+
 	. "goa.design/goa/v3/dsl"
 )
+
+func buildServer() {
+	address := "0.0.0.0"
+	httpPort := "8000"
+	grpcPort := "8080"
+	listenAddress, present := os.LookupEnv("LISTEN")
+	if present {
+		address = listenAddress
+	}
+	webPort, present := os.LookupEnv("HTTP_PORT")
+	if present {
+		httpPort = webPort
+	}
+	rpcPort, present := os.LookupEnv("GRPC_PORT")
+	if present {
+		grpcPort = rpcPort
+	}
+	Description(fmt.Sprintf("Run the service listening on %s.", address))
+	URI(fmt.Sprintf("http://%s:%s", address, httpPort))
+	URI(fmt.Sprintf("grpc://%s:%s", address, grpcPort))
+}
 
 var _ = API("fuseml", func() {
 	Title("FuseML core API")
@@ -17,19 +41,6 @@ var _ = API("fuseml", func() {
 		Services("runnable", "openapi")
 
 		// List the Hosts and their transport URLs.
-		Host("dev", func() {
-			Description("Run the service listening on localhost.")
-			// Transport specific URLs, supported schemes are:
-			// 'http', 'https', 'grpc' and 'grpcs' with the respective default
-			// ports: 80, 443, 8080, 8443.
-			URI("http://localhost:8000")
-			URI("grpc://localhost:8080")
-		})
-
-		Host("prod", func() {
-			Description("Run the service on listening on all interfaces.")
-			URI("http://0.0.0.0")
-			URI("grpc://0.0.0.0")
-		})
+		Host("prod", buildServer)
 	})
 })
