@@ -12,11 +12,33 @@ import (
 	"sync"
 	"syscall"
 
-	codeset "github.com/fuseml/fuseml-core/gen/codeset"
-	runnable "github.com/fuseml/fuseml-core/gen/runnable"
-	fuseml "github.com/fuseml/fuseml-core/pkg/core"
-	"github.com/fuseml/fuseml-core/pkg/core/gitea"
+	"github.com/timshannon/badgerhold/v3"
+
+	"github.com/fuseml/fuseml-core/gen/application"
+	"github.com/fuseml/fuseml-core/gen/codeset"
+	"github.com/fuseml/fuseml-core/gen/extension"
+	"github.com/fuseml/fuseml-core/gen/project"
+	"github.com/fuseml/fuseml-core/gen/runnable"
+	"github.com/fuseml/fuseml-core/gen/version"
+	"github.com/fuseml/fuseml-core/gen/workflow"
+	"github.com/fuseml/fuseml-core/pkg/core/config"
+	ver "github.com/fuseml/fuseml-core/pkg/version"
 )
+
+type coreInit struct {
+	endpoints *endpoints
+	store     *badgerhold.Store
+}
+
+type endpoints struct {
+	application *application.Endpoints
+	codeset     *codeset.Endpoints
+	project     *project.Endpoints
+	runnable    *runnable.Endpoints
+	version     *version.Endpoints
+	workflow    *workflow.Endpoints
+	extension   *extension.Endpoints
+}
 
 func main() {
 	// Define command line flags, add any other flag required to configure the
@@ -39,31 +61,16 @@ func main() {
 		logger = log.New(os.Stderr, "[fuseml] ", log.Ltime)
 	}
 
-	gitAdmin, err := gitea.NewAdminClient(logger)
+	logger.Printf("version: %s", ver.GetInfoStr())
+
+	storeOptions := badgerhold.DefaultOptions
+	storeOptions.Dir = "./data"
+	storeOptions.ValueDir = storeOptions.Dir
+
+	coreInit, err := InitializeCore(logger, storeOptions, config.FuseMLNamespace)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to initialize Gitea admin client: ", err.Error())
+		fmt.Fprintln(os.Stderr, "Failed to initialize fuseml-core: ", err.Error())
 		os.Exit(1)
-	}
-
-	// Initialize the services.
-	var (
-		runnableSvc runnable.Service
-		codesetSvc  codeset.Service
-	)
-	{
-		runnableSvc = fuseml.NewRunnable(logger)
-		codesetSvc = fuseml.NewCodesetService(logger, fuseml.NewGitCodesetStore(gitAdmin))
-	}
-
-	// Wrap the services in endpoints that can be invoked from other services
-	// potentially running in different processes.
-	var (
-		runnableEndpoints *runnable.Endpoints
-		codesetEndpoints  *codeset.Endpoints
-	)
-	{
-		runnableEndpoints = runnable.NewEndpoints(runnableSvc)
-		codesetEndpoints = codeset.NewEndpoints(codesetSvc)
 	}
 
 	// Create channel used by both the signal handler and server goroutines
@@ -107,7 +114,7 @@ func main() {
 			} else if u.Port() == "" {
 				u.Host = net.JoinHostPort(u.Host, "80")
 			}
-			handleHTTPServer(ctx, u, runnableEndpoints, codesetEndpoints, &wg, errc, logger, *dbgF)
+			handleHTTPServer(ctx, u, coreInit.endpoints, &wg, errc, logger, *dbgF)
 		}
 
 		{
@@ -133,7 +140,7 @@ func main() {
 			} else if u.Port() == "" {
 				u.Host = net.JoinHostPort(u.Host, "8080")
 			}
-			handleGRPCServer(ctx, u, runnableEndpoints, codesetEndpoints, &wg, errc, logger, *dbgF)
+			handleGRPCServer(ctx, u, coreInit.endpoints, &wg, errc, logger, *dbgF)
 		}
 
 	case "prod":
@@ -160,7 +167,7 @@ func main() {
 			} else if u.Port() == "" {
 				u.Host = net.JoinHostPort(u.Host, "80")
 			}
-			handleHTTPServer(ctx, u, runnableEndpoints, codesetEndpoints, &wg, errc, logger, *dbgF)
+			handleHTTPServer(ctx, u, coreInit.endpoints, &wg, errc, logger, *dbgF)
 		}
 
 		{
@@ -186,7 +193,7 @@ func main() {
 			} else if u.Port() == "" {
 				u.Host = net.JoinHostPort(u.Host, "8080")
 			}
-			handleGRPCServer(ctx, u, runnableEndpoints, codesetEndpoints, &wg, errc, logger, *dbgF)
+			handleGRPCServer(ctx, u, coreInit.endpoints, &wg, errc, logger, *dbgF)
 		}
 
 	default:
@@ -198,6 +205,9 @@ func main() {
 
 	// Send cancellation signal to the goroutines.
 	cancel()
+
+	// Closes the stores.
+	coreInit.store.Close()
 
 	wg.Wait()
 	logger.Println("exited")

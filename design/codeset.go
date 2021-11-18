@@ -62,24 +62,43 @@ var _ = Service("codeset", func() {
 		Description("Register a Codeset with the FuseML codeset store.")
 
 		Payload(func() {
-			Field(1, "codeset", Codeset, "Codeset descriptor")
-			Field(2, "location", String, "Path to the code that should be registered as Codeset", func() {
-				Example("mlflow-project-01")
+			Field(1, "name", String, "The name of the Codeset", func() {
+				Example("mlflow-app-01")
+				Pattern(`^[A-Za-z0-9_][A-Za-z0-9-_]*$`)
 			})
-			Required("codeset", "location")
+			Field(2, "project", String, "The project this Codeset belongs to", func() {
+				Example("mlflow-project-01")
+				Pattern(`^[A-Za-z0-9_][A-Za-z0-9-_]*$`)
+			})
+			Field(3, "description", String, "Codeset description", func() {
+				Example("My first MLFlow application with FuseML")
+				Default("")
+			})
+			Field(4, "labels", ArrayOf(String), "Additional Codeset labels that helps with identifying the type", func() {
+				Elem(func() {
+					Pattern(`^[A-Za-z0-9_][A-Za-z0-9-_]*$`)
+				})
+				Example([]string{"mlflow", "playground"})
+			})
+			Required("name", "project")
 		})
 
 		Error("BadRequest", func() {
 			Description("If the Codeset does not have the required fields, should return 400 Bad Request.")
 		})
 
-		Result(Codeset)
+		Result(func() {
+			Field(1, "codeset", Codeset, "Registered codeset")
+			Field(2, "username", String, "User for accessing new project")
+			Field(3, "password", String, "Password for new user")
+		})
 
 		HTTP(func() {
 			POST("/codesets")
-			Param("location", String, "Path to the code that should be registered as Codeset", func() {
-				Example("work/ml/mlflow-code")
-			})
+			Param("name")
+			Param("project")
+			Param("description")
+			Param("labels")
 			Response(StatusCreated)
 			Response("BadRequest", StatusBadRequest)
 		})
@@ -90,7 +109,7 @@ var _ = Service("codeset", func() {
 	})
 
 	Method("get", func() {
-		Description("Retrieve an Codeset from FuseML.")
+		Description("Retrieve a Codeset from FuseML.")
 
 		Payload(func() {
 			Field(1, "project", String, "Project name", func() {
@@ -124,6 +143,38 @@ var _ = Service("codeset", func() {
 			Response("NotFound", CodeNotFound)
 		})
 	})
+
+	Method("delete", func() {
+		Description("Delete a Codeset registered by FuseML.")
+
+		Payload(func() {
+			Field(1, "project", String, "Project name", func() {
+				Example("mlflow-project-01")
+			})
+			Field(2, "name", String, "Codeset name", func() {
+				Example("mlflow-app-01")
+			})
+			Required("project", "name")
+		})
+
+		Error("BadRequest", func() {
+			Description("If neither name or project is not given, should return 400 Bad Request.")
+		})
+		Error("NotFound", func() {
+			Description("If there is no codeset with the given name and project, should return 404 Not Found.")
+		})
+
+		HTTP(func() {
+			DELETE("/codesets/{project}/{name}")
+			Response(StatusNoContent)
+			Response("BadRequest", StatusBadRequest)
+		})
+		GRPC(func() {
+			Response(CodeOK)
+			Response("BadRequest", CodeInvalidArgument)
+		})
+	})
+
 })
 
 // Codeset describes the Codeset
@@ -137,6 +188,7 @@ var Codeset = Type("Codeset", func() {
 	})
 	Field(3, "description", String, "Codeset description", func() {
 		Example("My first MLFlow application with FuseML")
+		Default("")
 	})
 	Field(4, "labels", ArrayOf(String), "Additional Codeset labels that helps with identifying the type", func() {
 		Example([]string{"mlflow", "playground"})

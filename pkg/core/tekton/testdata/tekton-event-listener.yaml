@@ -1,0 +1,12 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: mlflow-sklearn-e2e
+  namespace: test-namespace
+spec:
+  serviceAccountName: tekton-triggers
+  triggers:
+    - bindings:
+        - ref: mlflow-sklearn-e2e
+      template:
+        ref: mlflow-sklearn-e2e

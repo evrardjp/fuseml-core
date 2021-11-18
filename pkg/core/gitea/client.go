@@ -2,21 +2,16 @@ package gitea
 
 import (
 	"log"
+	"math/rand"
 	"os"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/pkg/errors"
 
-	codeset "github.com/fuseml/fuseml-core/gen/codeset"
 	config "github.com/fuseml/fuseml-core/pkg/core/config"
+	"github.com/fuseml/fuseml-core/pkg/domain"
+	"github.com/fuseml/fuseml-core/pkg/util"
 )
-
-// AdminClient describes the interface of Gitea Admin Client
-type AdminClient interface {
-	PrepareRepository(code *codeset.Codeset) error
-	GetRepositories(org, label *string) ([]*codeset.Codeset, error)
-	GetRepository(org, name string) (*codeset.Codeset, error)
-}
 
 // Client describes the interface of Gitea Client
 type Client interface {
@@ -24,45 +19,69 @@ type Client interface {
 	CreateOrg(gitea.CreateOrgOption) (*gitea.Organization, *gitea.Response, error)
 	GetUserInfo(string) (*gitea.User, *gitea.Response, error)
 	AdminCreateUser(gitea.CreateUserOption) (*gitea.User, *gitea.Response, error)
+	AdminDeleteUser(string) (*gitea.Response, error)
 	ListOrgTeams(string, gitea.ListTeamsOptions) ([]*gitea.Team, *gitea.Response, error)
 	AddTeamMember(int64, string) (*gitea.Response, error)
+	ListTeamMembers(int64, gitea.ListTeamMembersOptions) ([]*gitea.User, *gitea.Response, error)
 	GetRepo(string, string) (*gitea.Repository, *gitea.Response, error)
 	CreateOrgRepo(string, gitea.CreateRepoOption) (*gitea.Repository, *gitea.Response, error)
 	AddRepoTopic(string, string, string) (*gitea.Response, error)
 	ListRepoHooks(string, string, gitea.ListHooksOptions) ([]*gitea.Hook, *gitea.Response, error)
 	ListOrgRepos(string, gitea.ListOrgReposOptions) ([]*gitea.Repository, *gitea.Response, error)
 	CreateRepoHook(string, string, gitea.CreateHookOption) (*gitea.Hook, *gitea.Response, error)
+	DeleteRepoHook(string, string, int64) (*gitea.Response, error)
 	ListRepoTopics(string, string, gitea.ListRepoTopicsOptions) ([]string, *gitea.Response, error)
 	ListMyOrgs(gitea.ListOrgsOptions) ([]*gitea.Organization, *gitea.Response, error)
+	ListUserOrgs(string, gitea.ListOrgsOptions) ([]*gitea.Organization, *gitea.Response, error)
+	DeleteRepo(string, string) (*gitea.Response, error)
+	DeleteOrg(string) (*gitea.Response, error)
+	DeleteOrgMembership(org, user string) (*gitea.Response, error)
 }
 
-// giteaAdminClient is the struct holding information about gitea client
-type giteaAdminClient struct {
+// AdminClient is the struct holding information about gitea client
+// Implements GitAdminClient interface
+type AdminClient struct {
 	giteaClient Client
 	url         string
 	logger      *log.Logger
 }
 
-var errGITEAURLMissing = "Value for gitea URL (GITEA_URL) was not provided."
-var errGITEAUSERNAMEMissing = "Value for gitea user name (GITEA_USERNAME) was not provided."
-var errGITEAPASSWORDMissing = "Value for gitea user password (GITEA_PASSWORD) was not provided."
-var errRepoNotFound = "Repository by that name not found"
+const (
+	errGITEAURLMissing           = giteaErr("Value for gitea URL (GITEA_URL) was not provided.")
+	errGITEAADMINUSERNAMEMissing = giteaErr("Value for gitea admin user name (GITEA_ADMIN_USERNAME) was not provided.")
+	errGITEAADMINPASSWORDMissing = giteaErr("Value for gitea admin user password (GITEA_ADMIN_PASSWORD) was not provided.")
+	errRepoNotFound              = giteaErr("Repository by that name not found")
+	errProjectNotEmpty           = giteaErr("Project has still codesets assigned. Delete them first")
+)
+
+type giteaErr string
+
+func (e giteaErr) Error() string {
+	return string(e)
+}
+
+var lettersForPassword = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+var generatedPasswordLength = 16
+
+// For now, turn off the password generation
+// But we need to fine a way how user can alter this value (env variable, config file, client param...)
+var generateUserPassword = false
 
 // NewAdminClient creates a new gitea client and performs authentication
 // from the credentials provided as env variables
-func NewAdminClient(logger *log.Logger) (AdminClient, error) {
+func NewAdminClient(logger *log.Logger) (*AdminClient, error) {
 
 	url, exists := os.LookupEnv("GITEA_URL")
 	if !exists {
-		return nil, errors.New(errGITEAURLMissing)
+		return nil, errGITEAURLMissing
 	}
-	username, exists := os.LookupEnv("GITEA_USERNAME")
+	username, exists := os.LookupEnv("GITEA_ADMIN_USERNAME")
 	if !exists {
-		return nil, errors.New(errGITEAUSERNAMEMissing)
+		return nil, errGITEAADMINUSERNAMEMissing
 	}
-	password, exists := os.LookupEnv("GITEA_PASSWORD")
+	password, exists := os.LookupEnv("GITEA_ADMIN_PASSWORD")
 	if !exists {
-		return nil, errors.New(errGITEAPASSWORDMissing)
+		return nil, errGITEAADMINPASSWORDMissing
 	}
 
 	client, err := gitea.NewClient(url)
@@ -72,7 +91,9 @@ func NewAdminClient(logger *log.Logger) (AdminClient, error) {
 
 	client.SetBasicAuth(username, password)
 
-	return giteaAdminClient{
+	logger.Printf("Using GITEA from: %s", url)
+
+	return &AdminClient{
 		giteaClient: client,
 		url:         url,
 		logger:      logger,
@@ -83,109 +104,140 @@ func generateUserName(org string) string {
 	return config.DefaultUserName(org)
 }
 
-func (gac giteaAdminClient) GetGiteaURL() (string, error) {
+func getUserPassword() string {
+	if !generateUserPassword {
+		return config.DefaultUserPassword
+	}
+	p := make([]rune, generatedPasswordLength)
+	for i := range p {
+		p[i] = lettersForPassword[rand.Intn(len(lettersForPassword))]
+	}
+	return string(p)
+}
+
+// GetGiteaURL returns the gitea url
+func (gac *AdminClient) GetGiteaURL() (string, error) {
 	return gac.url, nil
 }
 
-// CreateOrg creates an Org in gitea
-func (gac giteaAdminClient) CreateOrganization(org string) error {
+// CreateProject creates a Project (= implemented as Organization in git).
+// If ignoreExisting argument is true, the call will not fail when a project with same name already exists.
+func (gac *AdminClient) CreateProject(name, desc string, ignoreExisting bool) (*domain.Project, error) {
+	gac.logger.Printf("Creating project %s....", name)
 
-	gac.logger.Println("creating org " + org)
-	_, resp, err := gac.giteaClient.GetOrg(org)
+	_, resp, err := gac.giteaClient.GetOrg(name)
 	if resp == nil && err != nil {
-		return errors.Wrap(err, "Failed to make get org request")
+		return nil, errors.Wrap(err, "Failed to make get org request")
 	}
 
 	if resp != nil && resp.StatusCode == 200 {
-		gac.logger.Printf("Organization already exists.")
-		return nil
+		gac.logger.Printf("Project already exists.")
+		if ignoreExisting {
+			return nil, nil
+		}
+		return nil, domain.ErrProjectExists
 	}
 
 	_, _, err = gac.giteaClient.CreateOrg(gitea.CreateOrgOption{
-		Name: org,
+		Name:        name,
+		Description: desc,
 	})
 
 	if err != nil {
-		return errors.Wrap(err, "Failed to create org")
+		return nil, errors.Wrap(err, "Failed to create project")
 	}
-	return nil
+
+	return &domain.Project{
+		Name:        name,
+		Description: desc,
+	}, nil
 }
 
-// create user assigned to current project
-func (gac giteaAdminClient) CreateUser(org string) error {
+// CreateOrg creates an Org in gitea. Does not return an error if it already exists
+func (gac *AdminClient) createOrganizationIfNotPresent(org string) error {
+
+	_, err := gac.CreateProject(org, "", true)
+	return err
+}
+
+// CreateUser creates user assigned to current project
+func (gac *AdminClient) CreateUser(org string) (*string, *string, error) {
 	username := generateUserName(org)
+	password := getUserPassword()
 	user, resp, err := gac.giteaClient.GetUserInfo(username)
 	if resp == nil && err != nil {
-		return errors.Wrap(err, "Failed to make get user request")
+		return nil, nil, errors.Wrap(err, "Failed to make get user request")
 	}
 	if user != nil && user.ID != 0 {
 		gac.logger.Println("User already exists")
-		return nil
+		return nil, nil, nil
 	}
 
 	gac.logger.Printf("Creating user '%s'", username)
 	_, _, err = gac.giteaClient.AdminCreateUser(gitea.CreateUserOption{
 		Username:           username,
-		Email:              config.DefaultUserEmail,
-		Password:           config.DefaultUserPassword,
+		Email:              config.DefaultUserEmail(org),
+		Password:           password,
 		MustChangePassword: gitea.OptionalBool(false),
 		SendNotify:         false,
 	})
 	if err != nil {
-		return errors.Wrap(err, "Failed to create user")
+		return nil, nil, errors.Wrap(err, "Failed to create user")
 	}
 
 	teams, _, err := gac.giteaClient.ListOrgTeams(org, gitea.ListTeamsOptions{})
 	if err != nil {
-		return errors.Wrap(err, "Failed to list org teams")
+		return nil, nil, errors.Wrap(err, "Failed to list org teams")
 	}
 	for _, team := range teams {
 		if team.Name == "Owners" {
 			_, err = gac.giteaClient.AddTeamMember(team.ID, username)
 			if err != nil {
-				return errors.Wrap(err, "Failed adding user to Owners")
+				return nil, nil, errors.Wrap(err, "Failed adding user to Owners")
 			}
 			break
 		}
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "Failed to create application")
+		return nil, nil, errors.Wrap(err, "Failed to create application")
 	}
 
-	return nil
+	return &username, &password, nil
 }
 
-// create git repository with given name under given org
-func (gac giteaAdminClient) CreateRepo(c *codeset.Codeset) error {
-	_, resp, err := gac.giteaClient.GetRepo(c.Project, c.Name)
+// CreateRepo creates a git repository with given name under given org
+func (gac *AdminClient) CreateRepo(c *domain.Codeset) error {
+	repo, resp, err := gac.giteaClient.GetRepo(c.Project, c.Name)
 	if resp == nil && err != nil {
 		return errors.Wrap(err, "Failed to make get repo request")
 	}
 
 	if resp != nil && resp.StatusCode == 200 {
 		gac.logger.Printf("Repository '%s' already exists under '%s'", c.Name, c.Project)
+		c.URL = repo.CloneURL
 		return nil
 	}
 
 	gac.logger.Printf("Creating repository '%s' under '%s'...", c.Name, c.Project)
-	_, _, err = gac.giteaClient.CreateOrgRepo(c.Project, gitea.CreateRepoOption{
+	repo, _, err = gac.giteaClient.CreateOrgRepo(c.Project, gitea.CreateRepoOption{
 		Name:          c.Name,
 		AutoInit:      true,
-		Private:       true,
+		Private:       false,
 		DefaultBranch: "main",
-		Description:   *c.Description,
+		Description:   c.Description,
 	})
 
 	if err != nil {
 		return errors.Wrap(err, "Failed to create repository")
 	}
+	c.URL = repo.CloneURL
 
 	return nil
 }
 
-// Add topics to given repository
-func (gac giteaAdminClient) AddRepoTopics(org, name string, labels []string) error {
+// AddRepoTopics adds topics to given repository
+func (gac *AdminClient) AddRepoTopics(org, name string, labels []string) error {
 	for _, label := range labels {
 		_, err := gac.giteaClient.AddRepoTopic(org, name, label)
 		if err != nil {
@@ -195,80 +247,88 @@ func (gac giteaAdminClient) AddRepoTopics(org, name string, labels []string) err
 	return nil
 }
 
-// Create webhook for given repository and wire it to tekton listener
-func (gac giteaAdminClient) CreateRepoWebhook(org, name string) error {
+// CreateRepoWebhook creates webhook for given repository and wire it to the listenerURL
+func (gac *AdminClient) CreateRepoWebhook(org, name string, listenerURL *string) (*int64, error) {
+	if listenerURL == nil {
+		gac.logger.Printf("Webhook listener URL not provided, skipping creation")
+		return nil, nil
+	}
 	hooks, _, err := gac.giteaClient.ListRepoHooks(org, name, gitea.ListHooksOptions{})
 	if err != nil {
-		return errors.Wrap(err, "Failed to list webhooks")
+		return nil, errors.Wrap(err, "Failed to list webhooks")
 	}
 
 	for _, hook := range hooks {
 		url := hook.Config["url"]
-		if url == config.StagingEventListenerURL {
+		if url == *listenerURL {
 			gac.logger.Printf("Webhook for '%s' already exists", name)
-			return nil
+			return &hook.ID, nil
 		}
 	}
 
 	gac.logger.Printf("Creating Webhook for '%s' under '%s'...", name, org)
-	gac.giteaClient.CreateRepoHook(org, name, gitea.CreateHookOption{
+	hook, _, _ := gac.giteaClient.CreateRepoHook(org, name, gitea.CreateHookOption{
 		Active:       true,
 		BranchFilter: "*",
 		Config: map[string]string{
 			"secret":       config.HookSecret,
 			"http_method":  "POST",
-			"url":          config.StagingEventListenerURL,
+			"url":          *listenerURL,
 			"content_type": "json",
 		},
 		Type: "gitea",
 	})
 
+	return &hook.ID, nil
+}
+
+// DeleteRepoWebhook deletes a webhook for given repository
+func (gac *AdminClient) DeleteRepoWebhook(org, name string, hookID *int64) error {
+	gac.logger.Printf("Deleting Webhook for %q under %q...", name, org)
+	resp, err := gac.giteaClient.DeleteRepoHook(org, name, *hookID)
+	if err != nil {
+		if resp.StatusCode == 404 {
+			gac.logger.Printf("Webhook not found, skipping deletion")
+			return nil
+		}
+		return errors.Wrap(err, "Failed to delete webhook")
+	}
 	return nil
 }
 
-// Prepare the org, repository, and create user that clients can use for pushing
-func (gac giteaAdminClient) PrepareRepository(code *codeset.Codeset) error {
+// PrepareRepository prepares the org, repository, and creates a user
+func (gac *AdminClient) PrepareRepository(code *domain.Codeset, listenerURL *string) (*string, *string, error) {
 
-	err := gac.CreateOrganization(code.Project)
+	err := gac.createOrganizationIfNotPresent(code.Project)
 	if err != nil {
-		return errors.Wrap(err, "Create org failed")
+		return nil, nil, errors.Wrap(err, "Create org failed")
 	}
 
-	err = gac.CreateUser(code.Project)
+	user, pass, err := gac.CreateUser(code.Project)
 	if err != nil {
-		return errors.Wrap(err, "Create FuseML user failed")
+		return nil, nil, errors.Wrap(err, "Create FuseML user failed")
 	}
 
 	err = gac.CreateRepo(code)
 	if err != nil {
-		return errors.Wrap(err, "Create repo failed")
+		return nil, nil, errors.Wrap(err, "Create repo failed")
 	}
 
 	err = gac.AddRepoTopics(code.Project, code.Name, code.Labels)
 	if err != nil {
-		return errors.Wrap(err, "Failed to add topics to repository")
+		return nil, nil, errors.Wrap(err, "Failed to add topics to repository")
 	}
 
-	err = gac.CreateRepoWebhook(code.Project, code.Name)
+	_, err = gac.CreateRepoWebhook(code.Project, code.Name, listenerURL)
 	if err != nil {
-		return errors.Wrap(err, "Creating webhook failed")
+		return nil, nil, errors.Wrap(err, "Creating webhook failed")
 	}
-	return nil
+	return user, pass, nil
 }
 
-// simple check if a string is present in a slice
-func contains(s []string, str string) bool {
-	for _, v := range s {
-		if v == str {
-			return true
-		}
-	}
-	return false
-}
-
-// Get all repositories for given project, filter them for label (if given)
-func (gac giteaAdminClient) GetReposForOrg(org string, label *string) ([]*codeset.Codeset, error) {
-	var codesets []*codeset.Codeset
+// GetReposForOrg retrieves all repositories for given project, can be filtered by label
+func (gac *AdminClient) GetReposForOrg(org string, label *string) ([]*domain.Codeset, error) {
+	var codesets []*domain.Codeset
 	gac.logger.Printf("Listing repos for org '%s'...", org)
 	repos, _, err := gac.giteaClient.ListOrgRepos(org, gitea.ListOrgReposOptions{})
 	if err != nil {
@@ -276,28 +336,29 @@ func (gac giteaAdminClient) GetReposForOrg(org string, label *string) ([]*codese
 	}
 	for _, repo := range repos {
 		var labels []string
-		if label != nil {
-			labels, _, err = gac.giteaClient.ListRepoTopics(org, repo.Name, gitea.ListRepoTopicsOptions{})
-			if err != nil {
-				return nil, errors.Wrap(err, "Failed to list repo topics")
-			}
-			if !contains(labels, *label) {
-				continue
-			}
+		labels, _, err = gac.giteaClient.ListRepoTopics(org, repo.Name, gitea.ListRepoTopicsOptions{})
+		if err != nil {
+			return nil, errors.Wrap(err, "Failed to list repo topics")
 		}
-		codesets = append(codesets, &codeset.Codeset{
-			Name:    repo.Name,
-			Project: org,
-			Labels:  labels,
+		if label != nil && !util.StringInSlice(*label, labels) {
+			continue
+		}
+
+		codesets = append(codesets, &domain.Codeset{
+			Name:        repo.Name,
+			Project:     org,
+			Labels:      labels,
+			Description: repo.Description,
+			URL:         repo.CloneURL,
 		})
 	}
 	return codesets, nil
 }
 
-// Find all repositories, optionally filtered by project
-func (gac giteaAdminClient) GetRepositories(org, label *string) ([]*codeset.Codeset, error) {
+// GetRepositories retrieves all repositories, can be filtered by project(org) and label
+func (gac *AdminClient) GetRepositories(org, label *string) ([]*domain.Codeset, error) {
 
-	var allRepos []*codeset.Codeset
+	var allRepos []*domain.Codeset
 	var orgs []*gitea.Organization
 
 	if org == nil {
@@ -312,41 +373,180 @@ func (gac giteaAdminClient) GetRepositories(org, label *string) ([]*codeset.Code
 	}
 
 	for _, o := range orgs {
-		repos, err := gac.GetReposForOrg(o.UserName, label)
-		if err != nil {
-			return nil, errors.Wrap(err, "Failed to list repos for org "+o.UserName)
-		}
+		repos, _ := gac.GetReposForOrg(o.UserName, label)
 		allRepos = append(allRepos, repos...)
 	}
 	return allRepos, nil
 }
 
-// Get the information about repository
-func (gac giteaAdminClient) GetRepository(org, name string) (*codeset.Codeset, error) {
+// GetRepository retrieves information about the repository
+func (gac *AdminClient) GetRepository(org, name string) (*domain.Codeset, error) {
 	gac.logger.Printf("Get repo %s for org '%s'...", name, org)
 	repo, _, err := gac.giteaClient.GetRepo(org, name)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to read repository")
 	}
 	if repo == nil || repo.Name == "" {
-		return nil, errors.New(errRepoNotFound)
+		return nil, errRepoNotFound
 	}
 
-	ret := codeset.Codeset{
-		Name:    repo.Name,
-		Project: org,
-	}
-	if repo.Description == "" {
-		ret.Description = nil
-	} else {
-		ret.Description = &repo.Description
+	ret := domain.Codeset{
+		Name:        repo.Name,
+		Project:     org,
+		Description: repo.Description,
 	}
 	labels, _, err := gac.giteaClient.ListRepoTopics(org, name, gitea.ListRepoTopicsOptions{})
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to list repo topics")
 	}
 	ret.Labels = labels
-	ret.URL = &repo.CloneURL
+	ret.URL = repo.CloneURL
 
 	return &ret, nil
+}
+
+// DeleteRepository delete a repository
+func (gac *AdminClient) DeleteRepository(org, name string) error {
+	gac.logger.Printf("Going to delete repo %s for org '%s'...", name, org)
+
+	_, resp, err := gac.giteaClient.GetRepo(org, name)
+
+	if resp.StatusCode == 404 {
+		gac.logger.Printf("Repo does not exist, no need to delete")
+		return nil
+	}
+	if err != nil {
+		return errors.Wrap(err, "Failed to get repo")
+	}
+
+	_, err = gac.giteaClient.DeleteRepo(org, name)
+	if err != nil {
+		return errors.Wrap(err, "Failed to delete repository")
+	}
+	return nil
+}
+
+// return all non-admin users that are Owners for given organization
+func (gac *AdminClient) getProjectOwners(name string) ([]*domain.User, error) {
+
+	var ret []*domain.User
+	teams, _, err := gac.giteaClient.ListOrgTeams(name, gitea.ListTeamsOptions{})
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to list org teams")
+	}
+	for _, team := range teams {
+		if team.Name != "Owners" {
+			continue
+		}
+		users, _, err := gac.giteaClient.ListTeamMembers(team.ID, gitea.ListTeamMembersOptions{})
+		if err != nil {
+			return nil, errors.Wrap(err, "Failed listing members of Owners team")
+		}
+		for _, u := range users {
+			if u.IsAdmin {
+				continue
+			}
+			ret = append(ret, &domain.User{
+				Name:  u.UserName,
+				Email: u.Email,
+			})
+		}
+		break // no need to continue after checking Owners
+	}
+	return ret, nil
+}
+
+// GetProjects retrieves all projects (orgs)
+func (gac *AdminClient) GetProjects() ([]*domain.Project, error) {
+	gac.logger.Printf("listing git orgs....")
+
+	orgs, _, err := gac.giteaClient.ListMyOrgs(gitea.ListOrgsOptions{})
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to list orgs")
+	}
+
+	var ret []*domain.Project
+	for _, o := range orgs {
+		users, err := gac.getProjectOwners(o.UserName)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, &domain.Project{
+			Name:        o.UserName,
+			Description: o.Description,
+			Users:       users,
+		})
+	}
+	return ret, nil
+}
+
+// GetProject retrieves a project by its name
+func (gac *AdminClient) GetProject(name string) (*domain.Project, error) {
+	gac.logger.Printf("Fetching git org %s....", name)
+
+	org, _, err := gac.giteaClient.GetOrg(name)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to make get org request")
+	}
+	users, err := gac.getProjectOwners(name)
+	if err != nil {
+		return nil, err
+	}
+	ret := domain.Project{
+		Name:        org.UserName,
+		Description: org.Description,
+		Users:       users,
+	}
+	return &ret, nil
+}
+
+// DeleteProject deletes a project
+func (gac *AdminClient) DeleteProject(org string) error {
+	gac.logger.Printf("Deleting project %s....", org)
+	// 1. check if they are no repos
+	repos, _, err := gac.giteaClient.ListOrgRepos(org, gitea.ListOrgReposOptions{})
+	if err != nil {
+		return errors.Wrap(err, "Failed to list project repos")
+	}
+
+	if len(repos) > 0 {
+		return errProjectNotEmpty
+	}
+
+	// 2. delete all members of the project, if they are not owning any other project
+	owners, err := gac.getProjectOwners(org)
+	if err != nil {
+		return errors.Wrap(err, "Failed to list project owners")
+	}
+	usersOrgs := make(map[string]int)
+	for _, owner := range owners {
+		orgsForUser, _, err := gac.giteaClient.ListUserOrgs(owner.Name, gitea.ListOrgsOptions{})
+		if err != nil {
+			return errors.Wrap(err, "Failed to list orgs for user")
+		}
+		for range orgsForUser {
+			usersOrgs[owner.Name]++
+		}
+	}
+	for userName, orgNumber := range usersOrgs {
+		if orgNumber == 1 {
+			gac.logger.Printf("Removing user %s from %s ....", userName, org)
+			if _, err := gac.giteaClient.DeleteOrgMembership(org, userName); err != nil {
+				return errors.Wrap(err, "Failed to remove user from project")
+			}
+
+			gac.logger.Printf("Deleting user %s....", userName)
+			if _, err := gac.giteaClient.AdminDeleteUser(userName); err != nil {
+				return errors.Wrap(err, "Failed to delete user")
+			}
+		}
+	}
+
+	// 3. delete org now
+	_, err = gac.giteaClient.DeleteOrg(org)
+	if err != nil {
+		return errors.Wrap(err, "Failed deleting project")
+	}
+
+	return nil
 }

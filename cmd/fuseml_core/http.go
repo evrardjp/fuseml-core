@@ -11,22 +11,24 @@ import (
 	"sync"
 	"time"
 
-	codeset "github.com/fuseml/fuseml-core/gen/codeset"
+	applicationsvr "github.com/fuseml/fuseml-core/gen/http/application/server"
 	codesetsvr "github.com/fuseml/fuseml-core/gen/http/codeset/server"
+	extensionsvr "github.com/fuseml/fuseml-core/gen/http/extension/server"
 	openapisvr "github.com/fuseml/fuseml-core/gen/http/openapi/server"
+	projectsvr "github.com/fuseml/fuseml-core/gen/http/project/server"
 	runnablesvr "github.com/fuseml/fuseml-core/gen/http/runnable/server"
-	runnable "github.com/fuseml/fuseml-core/gen/runnable"
+	versionsvr "github.com/fuseml/fuseml-core/gen/http/version/server"
+	workflowsvr "github.com/fuseml/fuseml-core/gen/http/workflow/server"
 
+	"github.com/goccy/go-yaml"
 	goahttp "goa.design/goa/v3/http"
 	httpmdlwr "goa.design/goa/v3/http/middleware"
 	"goa.design/goa/v3/middleware"
-	"gopkg.in/yaml.v2"
 )
 
 // handleHTTPServer starts configures and starts a HTTP server on the given
 // URL. It shuts down the server if any error is received in the error channel.
-func handleHTTPServer(ctx context.Context, u *url.URL, runnableEndpoints *runnable.Endpoints, codesetEndpoints *codeset.Endpoints, wg *sync.WaitGroup, errc chan error, logger *log.Logger, debug bool) {
-
+func handleHTTPServer(ctx context.Context, u *url.URL, endpoints *endpoints, wg *sync.WaitGroup, errc chan error, logger *log.Logger, debug bool) {
 	// Setup goa log adapter.
 	var (
 		adapter middleware.Logger
@@ -56,28 +58,48 @@ func handleHTTPServer(ctx context.Context, u *url.URL, runnableEndpoints *runnab
 	// the service input and output data structures to HTTP requests and
 	// responses.
 	var (
-		runnableServer *runnablesvr.Server
-		codesetServer  *codesetsvr.Server
-		openapiServer  *openapisvr.Server
+		versionServer     *versionsvr.Server
+		applicationServer *applicationsvr.Server
+		runnableServer    *runnablesvr.Server
+		codesetServer     *codesetsvr.Server
+		projectServer     *projectsvr.Server
+		openapiServer     *openapisvr.Server
+		workflowServer    *workflowsvr.Server
+		extensionServer   *extensionsvr.Server
 	)
 	{
 		eh := errorHandler(logger)
-		runnableServer = runnablesvr.New(runnableEndpoints, mux, dec, enc, eh, nil)
-		codesetServer = codesetsvr.New(codesetEndpoints, mux, dec, enc, eh, nil)
-		openapiServer = openapisvr.New(nil, mux, dec, enc, eh, nil)
+		versionServer = versionsvr.New(endpoints.version, mux, dec, enc, eh, nil)
+		applicationServer = applicationsvr.New(endpoints.application, mux, dec, enc, eh, nil)
+		runnableServer = runnablesvr.New(endpoints.runnable, mux, dec, enc, eh, nil)
+		codesetServer = codesetsvr.New(endpoints.codeset, mux, dec, enc, eh, nil)
+		projectServer = projectsvr.New(endpoints.project, mux, dec, enc, eh, nil)
+		workflowServer = workflowsvr.New(endpoints.workflow, mux, dec, enc, eh, nil)
+		extensionServer = extensionsvr.New(endpoints.extension, mux, dec, enc, eh, nil)
+		openapiServer = openapisvr.New(nil, mux, dec, enc, eh, nil, nil, nil, nil, nil)
 		if debug {
 			servers := goahttp.Servers{
+				versionServer,
+				applicationServer,
 				runnableServer,
 				codesetServer,
+				projectServer,
 				openapiServer,
+				workflowServer,
+				extensionServer,
 			}
 			servers.Use(httpmdlwr.Debug(mux, os.Stdout))
 		}
 	}
 	// Configure the mux.
+	versionsvr.Mount(mux, versionServer)
+	applicationsvr.Mount(mux, applicationServer)
 	runnablesvr.Mount(mux, runnableServer)
 	codesetsvr.Mount(mux, codesetServer)
-	openapisvr.Mount(mux)
+	projectsvr.Mount(mux, projectServer)
+	openapisvr.Mount(mux, openapiServer)
+	workflowsvr.Mount(mux, workflowServer)
+	extensionsvr.Mount(mux, extensionServer)
 
 	// Wrap the multiplexer with additional middlewares. Middlewares mounted
 	// here apply to all the service endpoints.
@@ -90,13 +112,28 @@ func handleHTTPServer(ctx context.Context, u *url.URL, runnableEndpoints *runnab
 	// Start HTTP server using default configuration, change the code to
 	// configure the server as required by your service.
 	srv := &http.Server{Addr: u.Host, Handler: handler}
+	for _, m := range versionServer.Mounts {
+		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
+	for _, m := range applicationServer.Mounts {
+		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
 	for _, m := range runnableServer.Mounts {
 		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
 	for _, m := range codesetServer.Mounts {
 		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
+	for _, m := range projectServer.Mounts {
+		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
 	for _, m := range openapiServer.Mounts {
+		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
+	for _, m := range workflowServer.Mounts {
+		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
+	for _, m := range extensionServer.Mounts {
 		logger.Printf("HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
 
@@ -137,20 +174,23 @@ func errorHandler(logger *log.Logger) func(context.Context, http.ResponseWriter,
 // than YAML is requested it returns the decoder from the Goa RequestDecoder
 // function.
 func requestDecoder(r *http.Request) goahttp.Decoder {
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" {
-		// default to YAML
-		contentType = "application/x-yaml"
-	} else {
+	ct := r.Header.Get("Content-Type")
+
+	if ct != "" {
 		// sanitize
-		if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
-			contentType = mediaType
+		if mediaType, _, err := mime.ParseMediaType(ct); err == nil {
+			ct = mediaType
 		}
 	}
-	if contentType == "application/x-yaml" {
+
+	switch {
+	case ct == "", ct == "application/x-yaml", ct == "text/x-yaml":
+		fallthrough
+	case strings.HasSuffix(ct, "+yaml"):
 		return yaml.NewDecoder(r.Body)
+	default:
+		return goahttp.RequestDecoder(r)
 	}
-	return goahttp.RequestDecoder(r)
 }
 
 // responseEncoder implements the goahttp.Encoder interface.
@@ -168,16 +208,24 @@ func responseEncoder(ctx context.Context, w http.ResponseWriter) goahttp.Encoder
 		err error
 	)
 
+	negotiate := func(ct string) (goahttp.Encoder, string) {
+		switch {
+		case ct == "", ct == "*/*", ct == "application/x-yaml":
+			return yaml.NewEncoder(w), "application/x-yaml"
+		case ct == "text/x-yaml":
+			return yaml.NewEncoder(w), ct
+		case strings.HasSuffix(ct, "+yaml"):
+			return yaml.NewEncoder(w), ct
+		default:
+			return goahttp.ResponseEncoder(ctx, w), ct
+		}
+	}
+
 	if ct != "" {
 		// If content type explicitly set in the DSL, infer the response encoder
 		// from the content type context key.
 		if mt, _, err = mime.ParseMediaType(ct); err == nil {
-			switch {
-			case ct == "application/x-yaml" || strings.HasSuffix(ct, "+yaml"):
-				enc = yaml.NewEncoder(w)
-			default:
-				enc = goahttp.ResponseEncoder(ctx, w)
-			}
+			enc, mt = negotiate(ct)
 		}
 		goahttp.SetContentType(w, mt)
 		return enc
@@ -186,13 +234,6 @@ func responseEncoder(ctx context.Context, w http.ResponseWriter) goahttp.Encoder
 	var accept string
 	if a := ctx.Value(goahttp.AcceptTypeKey); a != nil {
 		accept = a.(string)
-	}
-
-	negotiate := func(a string) (goahttp.Encoder, string) {
-		if a == "" || a == "application/x-yaml" {
-			return yaml.NewEncoder(w), "application/x-yaml"
-		}
-		return goahttp.ResponseEncoder(ctx, w), a
 	}
 
 	// If Accept header exists in the request, infer the response encoder

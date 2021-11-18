@@ -16,13 +16,16 @@ COPY cmd/ cmd/
 COPY pkg/ pkg/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -ldflags '-s -w' -o fuseml_core ./cmd/fuseml_core
+ARG LDFLAGS="-w -s"
+RUN CGO_ENABLED=0 GO111MODULE=on go build -a -ldflags "$LDFLAGS" -o fuseml_core ./cmd/fuseml_core
 
 # Use docker scratch as minimal base image to package FuseML binaries
 # Refer to https://docs.docker.com/develop/develop-images/baseimages/#create-a-simple-parent-image-using-scratch
 # for more details
 FROM scratch
 WORKDIR /
+
+COPY --from=builder /workspace/gen/http/openapi*.* ./gen/http/
 COPY --from=builder /workspace/fuseml_core .
 
 ENTRYPOINT ["/fuseml_core", "-host", "prod"]

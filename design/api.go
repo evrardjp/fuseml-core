@@ -1,6 +1,7 @@
 package design
 
 import (
+	_ "github.com/fuseml/fuseml-core/design/cli"
 	. "goa.design/goa/v3/dsl"
 )
 
@@ -14,7 +15,7 @@ var _ = API("fuseml", func() {
 		Description("fuseml-core hosts the core services")
 
 		// List the services hosted by this server.
-		Services("runnable", "codeset", "openapi")
+		Services("application", "runnable", "codeset", "project", "workflow", "openapi")
 
 		// List the Hosts and their transport URLs.
 		Host("dev", func() {
